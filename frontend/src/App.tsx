@@ -1,87 +1,476 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import "./App.css";
 
-function generateID() {
-  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-  let id = "";
 
-  for (let i = 0; i < 32; i++) {
-    id += chars[Math.floor(Math.random() * chars.length)];
+const BACKEND =
+  "wss://cipher-khfp.onrender.com";
+
+
+
+function createID() {
+
+  let id = localStorage.getItem("cipher_id");
+
+  if(id) return id;
+
+
+  const chars =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+
+
+  id = "";
+
+  for(let i=0;i<32;i++){
+
+    id += chars[
+      Math.floor(
+        Math.random()*chars.length
+      )
+    ];
+
   }
+
+
+  localStorage.setItem(
+    "cipher_id",
+    id
+  );
+
 
   return id;
+
 }
 
-function App() {
-  const [myID] = useState(generateID());
-  const [addID, setAddID] = useState("");
-  const [contacts, setContacts] = useState<string[]>([]);
-
-  function addContact() {
-    if (addID.trim() !== "") {
-      setContacts([...contacts, addID]);
-      setAddID("");
-    }
-  }
-
-  function copyID() {
-    navigator.clipboard.writeText(myID);
-  }
-
-  return (
-    <div className="container">
-
-      <h1>Cipher</h1>
-      <p className="subtitle">
-        Private Nachrichten ohne Account
-      </p>
-
-      <section className="card">
-        <h2>Deine ID</h2>
-
-        <div className="idbox">
-          {myID}
-        </div>
-
-        <button onClick={copyID}>
-          ID kopieren
-        </button>
-      </section>
 
 
-      <section className="card">
-        <h2>Person hinzufügen</h2>
-
-        <input
-          placeholder="ID eingeben..."
-          value={addID}
-          onChange={(e) => setAddID(e.target.value)}
-        />
-
-        <button onClick={addContact}>
-          Hinzufügen
-        </button>
-
-      </section>
+// ---------- IndexedDB ----------
 
 
-      <section className="card">
-        <h2>Kontakte</h2>
+function openDB(){
 
-        {contacts.length === 0 ? (
-          <p>Keine Kontakte</p>
-        ) : (
-          contacts.map((contact, index) => (
-            <div className="contact" key={index}>
-              {contact}
-            </div>
-          ))
-        )}
+  return new Promise<IDBDatabase>((resolve)=>{
 
-      </section>
+    const request =
+      indexedDB.open(
+        "CipherDB",
+        1
+      );
 
-    </div>
+
+    request.onupgradeneeded =
+    ()=>{
+
+      request.result.createObjectStore(
+        "messages",
+        {
+          autoIncrement:true
+        }
+      );
+
+    };
+
+
+    request.onsuccess =
+    ()=>{
+
+      resolve(
+        request.result
+      );
+
+    };
+
+
+  });
+
+}
+
+
+
+async function saveMessage(
+  message:string
+){
+
+  const db =
+    await openDB();
+
+
+  const tx =
+    db.transaction(
+      "messages",
+      "readwrite"
+    );
+
+
+  tx.objectStore(
+    "messages"
+  ).add({
+
+    message,
+
+    time:
+    Date.now()
+
+  });
+
+}
+
+
+
+// ---------- Crypto ----------
+
+
+async function getKey(){
+
+  const password =
+    "cipher-local-key";
+
+
+  const hash =
+    await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder()
+      .encode(password)
+    );
+
+
+  return crypto.subtle.importKey(
+    "raw",
+    hash,
+    {
+      name:"AES-GCM"
+    },
+    false,
+    [
+      "encrypt",
+      "decrypt"
+    ]
   );
+
 }
+
+
+
+async function encrypt(
+  text:string
+){
+
+  const key =
+    await getKey();
+
+
+  const iv =
+    crypto.getRandomValues(
+      new Uint8Array(12)
+    );
+
+
+  const encrypted =
+    await crypto.subtle.encrypt(
+      {
+        name:"AES-GCM",
+        iv
+      },
+      key,
+      new TextEncoder()
+      .encode(text)
+    );
+
+
+  return {
+
+    data:
+    btoa(
+      String.fromCharCode(
+        ...new Uint8Array(encrypted)
+      )
+    ),
+
+
+    iv:
+    btoa(
+      String.fromCharCode(
+        ...iv
+      )
+    )
+
+  };
+
+}
+
+
+
+async function decrypt(
+ data:string,
+ iv:string
+){
+
+  const key =
+    await getKey();
+
+
+  const decrypted =
+    await crypto.subtle.decrypt(
+      {
+        name:"AES-GCM",
+        iv:
+        Uint8Array.from(
+          atob(iv),
+          c=>c.charCodeAt(0)
+        )
+      },
+      key,
+      Uint8Array.from(
+        atob(data),
+        c=>c.charCodeAt(0)
+      )
+    );
+
+
+  return new TextDecoder()
+  .decode(decrypted);
+
+}
+
+
+
+
+
+function App(){
+
+
+const [id] =
+useState(createID());
+
+
+const [ws,setWS] =
+useState<WebSocket|null>(null);
+
+
+const [target,setTarget] =
+useState("");
+
+
+const [text,setText] =
+useState("");
+
+
+const [messages,setMessages] =
+useState<string[]>([]);
+
+
+
+
+useEffect(()=>{
+
+
+const socket =
+new WebSocket(
+BACKEND
+);
+
+
+
+socket.onopen = ()=>{
+
+
+socket.send(JSON.stringify({
+
+type:"register",
+
+id
+
+}));
+
+
+console.log(
+"verbunden"
+);
+
+
+};
+
+
+
+
+socket.onmessage =
+async(e)=>{
+
+
+const data =
+JSON.parse(e.data);
+
+
+
+if(data.type==="message"){
+
+
+const msg =
+await decrypt(
+data.encrypted,
+data.iv
+);
+
+
+
+setMessages(old=>[
+...old,
+msg
+]);
+
+
+
+await saveMessage(
+msg
+);
+
+
+}
+
+
+};
+
+
+
+setWS(socket);
+
+
+
+return ()=>socket.close();
+
+
+
+},[id]);
+
+
+
+
+
+
+async function send(){
+
+
+if(!ws) return;
+
+
+const encrypted =
+await encrypt(
+text
+);
+
+
+
+ws.send(JSON.stringify({
+
+type:"message",
+
+to:target,
+
+
+encrypted:
+encrypted.data,
+
+
+iv:
+encrypted.iv
+
+
+}));
+
+
+setText("");
+
+}
+
+
+
+
+
+return (
+
+<div className="container">
+
+
+<h1>
+Cipher
+</h1>
+
+
+<p>
+Deine ID:
+</p>
+
+
+<div className="idbox">
+{id}
+</div>
+
+
+
+<input
+
+placeholder="Empfänger ID"
+
+value={target}
+
+onChange={
+e=>setTarget(
+e.target.value
+)
+}
+
+/>
+
+
+
+<input
+
+placeholder="Nachricht"
+
+value={text}
+
+onChange={
+e=>setText(
+e.target.value
+)
+}
+
+/>
+
+
+
+<button
+onClick={send}
+>
+Senden
+</button>
+
+
+
+<h2>
+Nachrichten
+</h2>
+
+
+{
+messages.map(
+(m,i)=>(
+
+<p key={i}>
+{m}
+</p>
+
+)
+)
+}
+
+
+
+</div>
+
+);
+
+
+}
+
 
 export default App;
