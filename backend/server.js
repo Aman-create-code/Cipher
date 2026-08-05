@@ -12,7 +12,7 @@ app.use(cors());
 app.use(express.json());
 
 
-app.get("/", (req,res)=>{
+app.get("/", (req, res) => {
     res.send("Cipher Backend läuft");
 });
 
@@ -20,224 +20,337 @@ app.get("/", (req,res)=>{
 const server = http.createServer(app);
 
 
-const wss = new WebSocketServer({
-    server
-});
-
 
 const db = new Pool({
+
     connectionString:
         process.env.DATABASE_URL,
-    ssl:{
-        rejectUnauthorized:false
+
+    ssl: {
+        rejectUnauthorized: false
     }
+
 });
 
 
-async function setup(){
 
-    await db.query(`
+// Datenbank vorbereiten
+async function setupDatabase() {
 
-    CREATE TABLE IF NOT EXISTS users(
+    try {
 
-        id TEXT PRIMARY KEY,
+        await db.query(`
 
-        public_key TEXT NOT NULL
+            CREATE TABLE IF NOT EXISTS users (
 
-    );
+                id TEXT PRIMARY KEY,
 
-    `);
+                public_key TEXT NOT NULL,
+
+                created_at TIMESTAMP DEFAULT NOW()
+
+            );
+
+        `);
+
+
+        console.log(
+            "Datenbank bereit"
+        );
+
+
+    } catch(error) {
+
+        console.log(
+            "Datenbank Fehler:",
+            error.message
+        );
+
+    }
 
 }
 
 
-setup();
+setupDatabase();
 
 
+
+const wss = new WebSocketServer({
+
+    server
+
+});
+
+
+
+// Online Nutzer
 const onlineUsers = new Map();
 
 
 
-wss.on("connection",(socket)=>{
+wss.on("connection", (socket) => {
 
 
-let userID=null;
+    console.log(
+        "Client verbunden"
+    );
 
 
+    let userID = null;
 
-socket.on("message",async(raw)=>{
 
 
-try{
+    socket.on("message", async(raw) => {
 
 
-const data =
-JSON.parse(raw.toString());
+        try {
 
 
+            const data =
+                JSON.parse(
+                    raw.toString()
+                );
 
-if(data.type==="register"){
 
 
-userID=data.id;
+            // Nutzer registrieren
+            if(data.type === "register") {
 
 
-onlineUsers.set(
-userID,
-socket
-);
+                userID = data.id;
 
 
+                onlineUsers.set(
+                    userID,
+                    socket
+                );
 
-await db.query(
 
-`
-INSERT INTO users(id,public_key)
 
-VALUES($1,$2)
+                await db.query(
 
-ON CONFLICT(id)
+                    `
+                    INSERT INTO users
+                    (
+                        id,
+                        public_key
+                    )
 
-DO UPDATE SET public_key=$2
-`,
-[
-data.id,
-data.publicKey
-]
+                    VALUES
+                    (
+                        $1,
+                        $2
+                    )
 
-);
+                    ON CONFLICT(id)
 
+                    DO UPDATE SET
+                    public_key = $2
+                    `,
 
-console.log(
-"User:",
-userID
-);
+                    [
+                        data.id,
+                        data.publicKey
+                    ]
 
+                );
 
-return;
 
-}
 
+                console.log(
+                    "User registriert:",
+                    userID
+                );
 
 
+                return;
 
+            }
 
-if(data.type==="getKey"){
 
 
-const result =
-await db.query(
 
-"SELECT public_key FROM users WHERE id=$1",
+            // Public Key holen
+            if(data.type === "getKey") {
 
-[data.target]
 
-);
+                const result =
+                    await db.query(
 
+                    `
+                    SELECT public_key
+                    FROM users
+                    WHERE id = $1
+                    `,
 
+                    [
+                        data.target
+                    ]
 
-if(result.rows.length){
+                );
 
 
-socket.send(JSON.stringify({
 
-type:"publicKey",
+                if(result.rows.length > 0) {
 
-publicKey:
-result.rows[0].public_key
 
-}));
+                    socket.send(
 
+                        JSON.stringify({
 
-}
+                            type:
+                            "publicKey",
 
 
-return;
+                            publicKey:
+                            result.rows[0].public_key
 
-}
+                        })
 
+                    );
 
 
+                }
 
 
-if(data.type==="message"){
+                return;
 
+            }
 
 
-const receiver =
-onlineUsers.get(data.to);
 
 
 
-if(receiver){
+            // Nachricht weiterleiten
+            if(data.type === "message") {
 
 
-receiver.send(JSON.stringify({
+                const receiver =
+                    onlineUsers.get(
+                        data.to
+                    );
 
-type:"message",
 
-encrypted:
-data.encrypted,
 
-iv:
-data.iv,
+                if(receiver) {
 
-from:userID
 
-}));
+                    receiver.send(
 
+                        JSON.stringify({
 
-}
+                            type:
+                            "message",
 
 
-}
+                            encrypted:
+                            data.encrypted,
 
 
+                            iv:
+                            data.iv,
 
-}catch(e){
 
-console.log(
-e.message
-);
+                            from:
+                            userID
 
-}
+                        })
+
+                    );
+
+
+                    console.log(
+                        "Nachricht weitergeleitet"
+                    );
+
+
+                } else {
+
+
+                    socket.send(
+
+                        JSON.stringify({
+
+                            type:
+                            "error",
+
+
+                            message:
+                            "Empfänger offline"
+
+                        })
+
+                    );
+
+
+                }
+
+
+                return;
+
+            }
+
+
+
+        } catch(error) {
+
+
+            console.log(
+                "Fehler:",
+                error.message
+            );
+
+
+        }
+
+
+    });
+
+
+
+
+    socket.on("close", () => {
+
+
+        if(userID) {
+
+
+            onlineUsers.delete(
+                userID
+            );
+
+
+            console.log(
+                "Client getrennt:",
+                userID
+            );
+
+
+        }
+
+
+    });
 
 
 
 });
 
 
-
-
-socket.on("close",()=>{
-
-
-if(userID){
-
-onlineUsers.delete(
-userID
-);
-
-}
-
-
-});
-
-
-
-});
 
 
 
 const PORT =
-process.env.PORT || 3000;
+    process.env.PORT || 3000;
 
 
-server.listen(PORT,()=>{
 
-console.log(
-"Cipher Backend läuft auf",
-PORT
-);
+server.listen(PORT, () => {
+
+
+    console.log(
+        "Cipher Backend läuft auf Port",
+        PORT
+    );
+
 
 });

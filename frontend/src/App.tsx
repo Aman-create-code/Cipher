@@ -1,116 +1,82 @@
 import { useEffect, useState } from "react";
 import "./App.css";
 
-
-const BACKEND =
-  "wss://cipher-khfp.onrender.com";
+const SERVER = "wss://cipher-khfp.onrender.com";
 
 
+let socket: WebSocket | null = null;
 
-function createID() {
+let myPrivateKey: CryptoKey | null = null;
+
+const sharedKeys = new Map<string, CryptoKey>();
+
+
+// ---------- ID ----------
+
+function getID() {
 
   let id = localStorage.getItem("cipher_id");
 
-  if(id) return id;
+  if (!id) {
 
+    id = crypto.randomUUID();
 
-  const chars =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-
-
-  id = "";
-
-  for(let i=0;i<32;i++){
-
-    id += chars[
-      Math.floor(
-        Math.random()*chars.length
-      )
-    ];
-
+    localStorage.setItem(
+      "cipher_id",
+      id
+    );
   }
 
-
-  localStorage.setItem(
-    "cipher_id",
-    id
-  );
-
-
   return id;
-
 }
-
 
 
 // ---------- IndexedDB ----------
 
+function saveLocal(message:string){
 
-function openDB(){
-
-  return new Promise<IDBDatabase>((resolve)=>{
-
-    const request =
-      indexedDB.open(
-        "CipherDB",
-        1
-      );
-
-
-    request.onupgradeneeded =
-    ()=>{
-
-      request.result.createObjectStore(
-        "messages",
-        {
-          autoIncrement:true
-        }
-      );
-
-    };
-
-
-    request.onsuccess =
-    ()=>{
-
-      resolve(
-        request.result
-      );
-
-    };
-
-
-  });
-
-}
-
-
-
-async function saveMessage(
-  message:string
-){
-
-  const db =
-    await openDB();
-
-
-  const tx =
-    db.transaction(
-      "messages",
-      "readwrite"
+  const request =
+    indexedDB.open(
+      "CipherMessages",
+      1
     );
 
 
-  tx.objectStore(
-    "messages"
-  ).add({
+  request.onupgradeneeded = ()=>{
 
-    message,
+    request.result.createObjectStore(
+      "messages",
+      {
+        autoIncrement:true
+      }
+    );
 
-    time:
-    Date.now()
+  };
 
-  });
+
+  request.onsuccess = ()=>{
+
+    const db =
+      request.result;
+
+
+    db.transaction(
+      "messages",
+      "readwrite"
+    )
+    .objectStore(
+      "messages"
+    )
+    .add({
+
+      message,
+
+      time:
+      Date.now()
+
+    });
+
+  };
 
 }
 
@@ -119,131 +85,206 @@ async function saveMessage(
 // ---------- Crypto ----------
 
 
-async function getKey(){
+async function createECDH(){
 
-  const password =
-    "cipher-local-key";
+ return crypto.subtle.generateKey(
+
+ {
+   name:"ECDH",
+   namedCurve:"P-256"
+ },
+
+ true,
+
+ [
+  "deriveKey"
+ ]
+
+ );
+
+}
 
 
-  const hash =
-    await crypto.subtle.digest(
-      "SHA-256",
-      new TextEncoder()
-      .encode(password)
-    );
+
+async function exportPublic(
+key:CryptoKey
+){
+
+ const data =
+ await crypto.subtle.exportKey(
+  "spki",
+  key
+ );
 
 
-  return crypto.subtle.importKey(
-    "raw",
-    hash,
-    {
-      name:"AES-GCM"
-    },
-    false,
-    [
-      "encrypt",
-      "decrypt"
-    ]
-  );
+ return btoa(
+ String.fromCharCode(
+ ...new Uint8Array(data)
+ )
+ );
+
+}
+
+
+
+async function importPublic(
+key:string
+){
+
+ const data =
+ Uint8Array.from(
+ atob(key),
+ c=>c.charCodeAt(0)
+ );
+
+
+ return crypto.subtle.importKey(
+
+ "spki",
+
+ data,
+
+ {
+  name:"ECDH",
+  namedCurve:"P-256"
+ },
+
+ true,
+
+ []
+
+ );
+
+}
+
+
+
+async function createSharedKey(
+privateKey:CryptoKey,
+publicKey:CryptoKey
+){
+
+ return crypto.subtle.deriveKey(
+
+ {
+  name:"ECDH",
+  public:publicKey
+ },
+
+ privateKey,
+
+ {
+  name:"AES-GCM",
+  length:256
+ },
+
+ false,
+
+ [
+  "encrypt",
+  "decrypt"
+ ]
+
+ );
 
 }
 
 
 
 async function encrypt(
-  text:string
+key:CryptoKey,
+text:string
 ){
 
-  const key =
-    await getKey();
+ const iv =
+ crypto.getRandomValues(
+ new Uint8Array(12)
+ );
 
 
-  const iv =
-    crypto.getRandomValues(
-      new Uint8Array(12)
-    );
+ const encrypted =
+ await crypto.subtle.encrypt(
+
+ {
+  name:"AES-GCM",
+  iv
+ },
+
+ key,
+
+ new TextEncoder()
+ .encode(text)
+
+ );
 
 
-  const encrypted =
-    await crypto.subtle.encrypt(
-      {
-        name:"AES-GCM",
-        iv
-      },
-      key,
-      new TextEncoder()
-      .encode(text)
-    );
+ return {
 
+ data:
+ btoa(
+ String.fromCharCode(
+ ...new Uint8Array(encrypted)
+ )
+ ),
 
-  return {
+ iv:
+ btoa(
+ String.fromCharCode(
+ ...iv
+ )
+ )
 
-    data:
-    btoa(
-      String.fromCharCode(
-        ...new Uint8Array(encrypted)
-      )
-    ),
-
-
-    iv:
-    btoa(
-      String.fromCharCode(
-        ...iv
-      )
-    )
-
-  };
+ };
 
 }
 
 
 
 async function decrypt(
- data:string,
- iv:string
+key:CryptoKey,
+data:string,
+iv:string
 ){
 
-  const key =
-    await getKey();
+ const decrypted =
+ await crypto.subtle.decrypt(
+
+ {
+  name:"AES-GCM",
+
+  iv:
+  Uint8Array.from(
+   atob(iv),
+   c=>c.charCodeAt(0)
+  )
+
+ },
+
+ key,
+
+ Uint8Array.from(
+ atob(data),
+ c=>c.charCodeAt(0)
+ )
+
+ );
 
 
-  const decrypted =
-    await crypto.subtle.decrypt(
-      {
-        name:"AES-GCM",
-        iv:
-        Uint8Array.from(
-          atob(iv),
-          c=>c.charCodeAt(0)
-        )
-      },
-      key,
-      Uint8Array.from(
-        atob(data),
-        c=>c.charCodeAt(0)
-      )
-    );
-
-
-  return new TextDecoder()
-  .decode(decrypted);
+ return new TextDecoder()
+ .decode(decrypted);
 
 }
 
 
 
+// ---------- APP ----------
 
 
 function App(){
 
 
 const [id] =
-useState(createID());
-
-
-const [ws,setWS] =
-useState<WebSocket|null>(null);
+useState(getID());
 
 
 const [target,setTarget] =
@@ -254,18 +295,35 @@ const [text,setText] =
 useState("");
 
 
-const [messages,setMessages] =
+const [list,setList] =
 useState<string[]>([]);
-
 
 
 
 useEffect(()=>{
 
 
-const socket =
+async function start(){
+
+
+const keys =
+await createECDH();
+
+
+myPrivateKey =
+keys.privateKey;
+
+
+const publicKey =
+await exportPublic(
+keys.publicKey
+);
+
+
+
+socket =
 new WebSocket(
-BACKEND
+SERVER
 );
 
 
@@ -273,55 +331,100 @@ BACKEND
 socket.onopen = ()=>{
 
 
-socket.send(JSON.stringify({
+socket!.send(JSON.stringify({
 
 type:"register",
 
-id
+id,
+
+publicKey
 
 }));
-
-
-console.log(
-"verbunden"
-);
 
 
 };
 
 
 
-
 socket.onmessage =
-async(e)=>{
+async(event)=>{
 
 
 const data =
-JSON.parse(e.data);
+JSON.parse(
+event.data
+);
+
+
+
+if(data.type==="publicKey"){
+
+
+const contactPublic =
+await importPublic(
+data.publicKey
+);
+
+
+
+const shared =
+await createSharedKey(
+myPrivateKey!,
+contactPublic
+);
+
+
+
+sharedKeys.set(
+target,
+shared
+);
+
+
+sendEncrypted();
+
+
+
+}
+
 
 
 
 if(data.type==="message"){
 
 
+
+const key =
+sharedKeys.get(
+data.from
+);
+
+
+
+if(!key) return;
+
+
+
 const msg =
 await decrypt(
+key,
 data.encrypted,
 data.iv
 );
 
 
 
-setMessages(old=>[
+setList(
+old=>[
 ...old,
 msg
-]);
-
-
-
-await saveMessage(
-msg
+]
 );
+
+
+
+saveLocal(msg);
+
 
 
 }
@@ -331,17 +434,65 @@ msg
 
 
 
-setWS(socket);
+}
+
+
+start();
+
+
+},[]);
 
 
 
-return ()=>socket.close();
+let waitingText="";
 
 
 
-},[id]);
+async function sendEncrypted(){
 
 
+if(!socket) return;
+
+
+
+const key =
+sharedKeys.get(
+target
+);
+
+
+
+if(!key) return;
+
+
+
+const encrypted =
+await encrypt(
+key,
+waitingText
+);
+
+
+
+socket.send(JSON.stringify({
+
+type:"message",
+
+to:target,
+
+encrypted:
+encrypted.data,
+
+iv:
+encrypted.iv
+
+}));
+
+
+waitingText="";
+
+
+}
 
 
 
@@ -349,38 +500,43 @@ return ()=>socket.close();
 async function send(){
 
 
-if(!ws) return;
+if(!socket) return;
 
 
-const encrypted =
-await encrypt(
-text
+waitingText=text;
+
+
+
+const key =
+sharedKeys.get(
+target
 );
 
 
 
-ws.send(JSON.stringify({
+if(key){
 
-type:"message",
+sendEncrypted();
 
-to:target,
+}
 
-
-encrypted:
-encrypted.data,
+else{
 
 
-iv:
-encrypted.iv
+socket.send(JSON.stringify({
 
+type:"getKey",
+
+target
 
 }));
+
+}
 
 
 setText("");
 
 }
-
 
 
 
@@ -413,9 +569,7 @@ placeholder="Empfänger ID"
 value={target}
 
 onChange={
-e=>setTarget(
-e.target.value
-)
+e=>setTarget(e.target.value)
 }
 
 />
@@ -429,18 +583,14 @@ placeholder="Nachricht"
 value={text}
 
 onChange={
-e=>setText(
-e.target.value
-)
+e=>setText(e.target.value)
 }
 
 />
 
 
 
-<button
-onClick={send}
->
+<button onClick={send}>
 Senden
 </button>
 
@@ -452,14 +602,11 @@ Nachrichten
 
 
 {
-messages.map(
-(m,i)=>(
-
+list.map(
+(m,i)=>
 <p key={i}>
 {m}
 </p>
-
-)
 )
 }
 
